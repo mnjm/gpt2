@@ -5,10 +5,12 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-from utils import get_torch_device
+from utils import get_torch_device, GPT2DataLoaderLite
 
 device = get_torch_device()
 print(f"using device: {device}")
+
+torch.manual_seed(31415)
 
 @dataclass
 class GPTConfig:
@@ -92,6 +94,9 @@ class GPT(nn.Module):
             ln_f = nn.LayerNorm(config.n_embd),
         ))
         self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        
+        # weight sharing scheme
+        self.transformer.wte.weight = self.lm_head.weight
     
     def forward(self, idx, target=None):
         B, T = idx.size()
@@ -159,25 +164,16 @@ class GPT(nn.Module):
 
 if __name__ == "__main__":
     
-    # get data batch
-    import tiktoken
-    enc = tiktoken.get_encoding('gpt2')
-    with open('input.txt', 'r') as f:
-        text = f.read()
-    text = text[:1000]
-    tokens = enc.encode(text)
-    B, T = 4, 32
-    buf = torch.tensor(tokens[:B*T + 1])
-    buf = buf.to(device)
-    x = buf[:-1].view(B, T)
-    y = buf[1:].view(B, T)
-    
     model = GPT(GPTConfig())
     model.to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
     
+    train_loader = GPT2DataLoaderLite("input.txt", B=4, T=32)
+    
     # training
     for i in range(50):
+        x, y = train_loader.next_batch()
+        x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
         logits, loss = model(x, y)
         loss.backward()
