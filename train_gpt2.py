@@ -38,35 +38,22 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         # below is not a "bias", it is a mask / trill but following OpenAI/HF naming so..
-        self.register_buffer(
-            "bias",
-            torch.tril(torch.ones(config.block_size, config.block_size)).view(
-                1, 1, config.block_size, config.block_size
-            ),
-        )
+        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
         B, T, C = x.size()  # batch size, sequence length, embd dim (n_embd)
         # calculate query, key, values for all heads in batch and move forward to the batch
         # nh is no. of heads, hs is head size, and C is number of channles = nh * hs
         q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
-        k = k.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        q = q.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
-        v = v.view(B, T, self.n_head, C // self.n_head).transpose(
-            1, 2
-        )  # (B, nh, T, hs)
+        k = k.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
+        v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         # attention (materializes the large (T, T) matrix for all the queries and keys)
         attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
         attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
         attn = F.softmax(attn, dim=-1)
         y = attn @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = (
-            y.transpose(1, 2).contiguous().view(B, T, C)
-        )  # re-assemble all head outputs side by side
+        y = (y.transpose(1, 2).contiguous().view(B, T, C))  # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
         return y
@@ -138,12 +125,8 @@ class GPT(nn.Module):
 
     def forward(self, idx, target=None):
         B, T = idx.size()
-        assert T <= self.config.block_size, (
-            f"Cannt forward sequence of length {T}, block size is only {self.config.block_size}"
-        )
-        pos_emb = self.transformer.wpe(
-            torch.arange(0, T, dtype=torch.long, device=idx.device)
-        )  # pos embedding (T, n_embd)
+        assert T <= self.config.block_size, (f"Cannt forward sequence of length {T}, block size is only {self.config.block_size}")
+        pos_emb = self.transformer.wpe(torch.arange(0, T, dtype=torch.long, device=idx.device))  # pos embedding (T, n_embd)
         tok_emb = self.transformer.wte(idx)  #  token embedding (B, T, n_embd)
         x = tok_emb + pos_emb  # (B, T, n_embd)
         for block in self.transformer.h:
@@ -152,9 +135,7 @@ class GPT(nn.Module):
         logits = self.lm_head(x)  # (B, T, vocab_size)
         loss = None
         if target is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1
-            )
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1)
         return logits, loss
 
     @classmethod
@@ -179,9 +160,7 @@ class GPT(nn.Module):
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
-        sd_keys = [
-            k for k in sd_keys if not k.endswith(".attn.bias")
-        ]  # discard this mask / buffer
+        sd_keys = [ k for k in sd_keys if not k.endswith(".attn.bias") ]  # discard this mask / buffer
 
         # init a hf/transformer model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -189,12 +168,8 @@ class GPT(nn.Module):
 
         # copy while ensuring all of the params are aligned and match in names and shapes
         sd_keys_hf = sd_hf.keys()
-        sd_keys_hf = [
-            k for k in sd_keys_hf if not k.endswith(".attn.masked_bias")
-        ]  # ignore these masks
-        sd_keys_hf = [
-            k for k in sd_keys_hf if not k.endswith(".attn.bias")
-        ]  # ignore biases, same as masks
+        sd_keys_hf = [ k for k in sd_keys_hf if not k.endswith(".attn.masked_bias") ]  # ignore these masks
+        sd_keys_hf = [ k for k in sd_keys_hf if not k.endswith(".attn.bias") ]  # ignore biases, same as masks
         transposed = [
             "attn.c_attn.weight",
             "attn.c_proj.weight",
@@ -203,9 +178,7 @@ class GPT(nn.Module):
         ]
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
-        assert len(sd_keys_hf) == len(sd_keys), (
-            f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
-        )
+        assert len(sd_keys_hf) == len(sd_keys), (f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}")
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
@@ -227,6 +200,8 @@ if __name__ == "__main__":
 
     model = GPT(GPTConfig())
     model.to(device)
+    model = torch.compile(model)
+
     optimizer = torch.optim.AdamW(model.parameters(), lr=3e-4)
 
     train_loader = GPT2DataLoaderLite("input.txt", B=4, T=1024)
@@ -237,7 +212,6 @@ if __name__ == "__main__":
         x, y = train_loader.next_batch()
         x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        # only use bf16 when using ampere+ CUDA GPU
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             logits, loss = model(x, y)
         loss.backward()
@@ -247,6 +221,4 @@ if __name__ == "__main__":
         t1 = time()
         dt = (t1 - t0) * 1000
         tokens_per_sec = (train_loader.B * train_loader.T) / (t1 - t0)
-        print(
-            f"step {i} loss:{loss.item()}, dt {dt:.2f}ms tok/sec: {tokens_per_sec:.2f}"
-        )
+        print(f"step {i} loss:{loss.item()}, dt {dt:.2f}ms tok/sec: {tokens_per_sec:.2f}")
