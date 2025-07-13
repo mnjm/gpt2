@@ -207,7 +207,7 @@ if __name__ == "__main__":
     # Uses TF32 if available
     torch.set_float32_matmul_precision("high")
 
-    model = GPT(GPTConfig())
+    model = GPT(GPTConfig(vocab_size=50304))
     model.to(device)
     model = torch.compile(model)
 
