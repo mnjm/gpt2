@@ -37,8 +37,12 @@ class CausalSelfAttention(nn.Module):
         # regularization
         self.n_head = config.n_head
         self.n_embd = config.n_embd
-        # below is not a "bias", it is a mask / trill but following OpenAI/HF naming so..
-        self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
+        # flash attention is only supported from torch >= 2.0
+        self.flash_attn = hasattr(F, 'scaled_dot_product_attention')
+        if not self.flash_attn:
+            print("WARNING: Using slow attention. Flash attention is only supported in Pytorch >= 2.0")
+            # below is not a "bias", it is a mask / trill but following OpenAI/HF naming so..
+            self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
 
     def forward(self, x):
         B, T, C = x.size()  # batch size, sequence length, embd dim (n_embd)
@@ -49,10 +53,15 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         # attention (materializes the large (T, T) matrix for all the queries and keys)
-        attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-        attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
-        attn = F.softmax(attn, dim=-1)
-        y = attn @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
+        if self.flash_attn:
+            # efficient attention using Flash Attention CUDA kernels
+            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+        else:
+            # manual implementation of attention
+            attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+            attn = F.softmax(attn, dim=-1)
+            y = attn @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = (y.transpose(1, 2).contiguous().view(B, T, C))  # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
