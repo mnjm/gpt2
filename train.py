@@ -13,8 +13,8 @@ from model import GPT, GPTConfig
 # ------------- params -------------
 max_lr = 6e-4
 min_lr = max_lr * 0.1
-warmup_steps = 10
-n_steps = 50
+warmup_steps = 300 # 715
+n_steps = 19073
 total_batch_size_tok = 524288 # 2**19, ~0.5M in number of tokens | desired batch size | for grad accumulation
 micro_batch_size = 16
 block_size = 1024 # context length
