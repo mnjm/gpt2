@@ -14,9 +14,14 @@ max_lr = 6e-4
 min_lr = max_lr * 0.1
 warmup_steps = 10
 max_steps = 50
-batch_size = 4
+total_batch_size_tok = 524288 # 2**19, ~0.5M in number of tokens | desired batch size | for grad accumulation
+micro_batch_size = 4
 block_size = 1024 # context length
 # ----------------------------------
+tok_per_microbatch = micro_batch_size * block_size
+assert total_batch_size_tok % tok_per_microbatch == 0, f"Make sure {total_batch_size_tok=} is divisible by (batch_size * block_size)"
+grad_accum_steps = total_batch_size_tok // tok_per_microbatch
+print(f"Calculated gradient accumulation steps: {grad_accum_steps}")
 
 torch.manual_seed(1337)
 if torch.cuda.is_available():
@@ -71,17 +76,21 @@ if __name__ == "__main__":
 
     optimizer = configure_optimizer(model, weight_decay=0.1, learning_rate=6e-4, device=device) # lr is updated in the training loop below
 
-    train_loader = GPT2DataLoaderLite("input.txt", B=batch_size, T=block_size)
+    train_loader = GPT2DataLoaderLite("input.txt", B=micro_batch_size, T=block_size)
 
     for step in range(max_steps):
         t0 = time()
-        x, y = train_loader.next_batch()
-        x, y = x.to(device), y.to(device)
         optimizer.zero_grad()
-        # autocast the forward pass to bfloat16 - i think it only applies to matmul ops check: https://docs.pytorch.org/docs/stable/amp.html#torch.autocast
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            logits, loss = model(x, y)
-        loss.backward()
+        loss_accum = 0.0
+        for mico_step in range(grad_accum_steps):
+            x, y = train_loader.next_batch()
+            x, y = x.to(device), y.to(device)
+            # autocast the forward pass to bfloat16 - i think it only applies to matmul ops check: https://docs.pytorch.org/docs/stable/amp.html#torch.autocast
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits, loss = model(x, y)
+            loss /= grad_accum_steps
+            loss_accum += loss.detach()
+            loss.backward()
         # clip the max global norm to 1.0 - stabalizes trainig during unlucky bad data batch causing shocking the model
         norm = torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
         # determine and set lr this step
@@ -92,5 +101,6 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         dt = (time() - t0)
-        tokens_per_sec = (train_loader.B * train_loader.T) / dt
-        print(f"step: {step:5d} | loss: {loss.item():.6f} | lr: {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+        tokens_processed = train_loader.B * train_loader.T * grad_accum_steps
+        tokens_per_sec = tokens_processed / dt
+        print(f"step: {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
