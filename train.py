@@ -12,7 +12,7 @@ from utils import get_torch_device, TinyShakespeareLoader, FineWebEduLoader
 from model import GPT, GPTConfig
 
 # ------------- params -------------
-max_lr = 6e-4
+max_lr = 1.2e-3 # 6e-4 * 2 Doubled the learning rate compared to GPT2
 min_lr = max_lr * 0.1
 warmup_steps = 300 # 715
 n_steps = 19073
@@ -55,7 +55,7 @@ def _print(text):
     if master_process:
         print(text)
         
-assert save_ckpt_every % val_per_step, "val_per_step should be multiple of save_ckpt_every"
+assert save_ckpt_every % val_per_step == 0, "val_per_step should be multiple of save_ckpt_every"
 tok_per_microbatch = micro_batch_size * block_size * ddp_world_size
 assert total_batch_size_tok % tok_per_microbatch == 0, f"Make sure {total_batch_size_tok=} is divisible by (batch_size * block_size * dpp_world_size)"
 grad_accum_steps = total_batch_size_tok // tok_per_microbatch
@@ -123,7 +123,7 @@ def main():
         model = DDP(model, device_ids=[ddp_local_rank])
     raw_model = model.module if ddp else model # raw unwrapped model
     
-    device_type = "cuda" if device.startswith("cuda") else "cpu"
+    device_type = "cuda" if ddp else device.type
 
     optimizer = configure_optimizer(raw_model, weight_decay=0.1, learning_rate=6e-4, device=device) # lr is updated in the training loop below
 
