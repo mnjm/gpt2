@@ -8,7 +8,7 @@ from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 from pathlib import Path
 
-from utils import get_torch_device, TinyShakespeareLoader, FineWebEduLoader
+from utils import get_torch_device, FineWebEduLoader #, TinyShakespeareLoader
 from model import GPT, GPTConfig
 
 # ------------- params -------------
@@ -49,12 +49,12 @@ else:
     master_process = True
     device = get_torch_device()
     print(f"using device: {device}")
-    
+
 def _print(text):
     # just a wrappper that print things only in the master process
     if master_process:
         print(text)
-        
+
 assert save_ckpt_every % val_per_step == 0, "val_per_step should be multiple of save_ckpt_every"
 tok_per_microbatch = micro_batch_size * block_size * ddp_world_size
 assert total_batch_size_tok % tok_per_microbatch == 0, f"Make sure {total_batch_size_tok=} is divisible by (batch_size * block_size * dpp_world_size)"
@@ -112,7 +112,7 @@ def configure_optimizer(model: torch.nn.Module, weight_decay: float, learning_ra
 def main():
     train_loader = FineWebEduLoader(batch_size=micro_batch_size, block_size=block_size, proc_rank=ddp_local_rank, n_proc=ddp_world_size, split="train")
     val_loader = FineWebEduLoader(batch_size=micro_batch_size, block_size=block_size, proc_rank=ddp_local_rank, n_proc=ddp_world_size, split="val")
-    
+
     # Uses TF32 if available check: https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
     torch.set_float32_matmul_precision("high")
 
@@ -122,7 +122,7 @@ def main():
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
     raw_model = model.module if ddp else model # raw unwrapped model
-    
+
     device_type = "cuda" if ddp else device.type
 
     optimizer = configure_optimizer(raw_model, weight_decay=0.1, learning_rate=6e-4, device=device) # lr is updated in the training loop below
@@ -130,7 +130,7 @@ def main():
     for step in range(n_steps):
         last_step = step == (n_steps - 1)
         t0 = time()
-        
+
          # once in a while evaluate our validation loss
         if step % 250 == 0 or last_step:
             model.eval()
@@ -162,7 +162,7 @@ def main():
                         # 'rng_seed': rng_seed
                     }
                     torch.save(checkpoint, str(checkpoint_path))
-        
+
         # train
         model.train()
         optimizer.zero_grad()
@@ -201,9 +201,9 @@ def main():
         if master_process:
             with log_file.open("a") as f:
                 f.write(f"{step} train {loss_accum.item():.6f}\n")
-    
+
     if ddp:
         destroy_process_group()
-        
+
 if __name__ == "__main__":
     main()
