@@ -10,6 +10,16 @@ import torch.distributed as dist
 from utils import get_torch_device, TinyShakespeareLoader
 from model import GPT, GPTConfig
 
+# ------------- params -------------
+max_lr = 6e-4
+min_lr = max_lr * 0.1
+warmup_steps = 10
+n_steps = 50
+total_batch_size_tok = 524288 # 2**19, ~0.5M in number of tokens | desired batch size | for grad accumulation
+micro_batch_size = 16
+block_size = 1024 # context length
+# ----------------------------------
+
 # set up DDP (distributed data parallel)
 # torchrun command sets the new env vars RANK, LOCAL_RANK and WORLD_SIZE
 # RANK = global id of the current process involved in distributed training accross nodes
@@ -41,23 +51,18 @@ def _print(text):
     if master_process:
         print(text)
         
-# ------------- params -------------
-max_lr = 6e-4
-min_lr = max_lr * 0.1
-warmup_steps = 10
-max_steps = 50
-total_batch_size_tok = 524288 # 2**19, ~0.5M in number of tokens | desired batch size | for grad accumulation
-micro_batch_size = 16
-block_size = 1024 # context length
-# ----------------------------------
 tok_per_microbatch = micro_batch_size * block_size * ddp_world_size
 assert total_batch_size_tok % tok_per_microbatch == 0, f"Make sure {total_batch_size_tok=} is divisible by (batch_size * block_size * dpp_world_size)"
 grad_accum_steps = total_batch_size_tok // tok_per_microbatch
 _print(f"Calculated gradient accumulation steps: {grad_accum_steps}")
 
-torch.manual_seed(1337)
+log_dir = "./logs"
+os.makedirs(log_dir, exist_ok=True)
+rng_seed = 1337
+
+torch.manual_seed(rng_seed)
 if torch.cuda.is_available():
-    torch.cuda.manual_seed(1337)
+    torch.cuda.manual_seed(rng_seed)
 
 # vocab_size changed from 50257 (vocab_size of gpt2) to 50304 as it is close to a power of 2
 # which aligns well with memory and GPT tensor core optimizations, making it more efficient for
@@ -69,10 +74,10 @@ def get_lr(step):
     if step < warmup_steps:
         return max_lr * (step+1) / warmup_steps
     # 2) if step > max_steps, return min learning rate
-    elif step > max_steps:
+    elif step > n_steps:
         return min_lr
     # 3) in between, use cosine decay down to min learning rate
-    decay_ratio = (step - warmup_steps) / (max_steps - warmup_steps)
+    decay_ratio = (step - warmup_steps) / (n_steps - warmup_steps)
     assert 0 <= decay_ratio <= 1
     coeff = 0.5 * (1.0 + math.cos(math.pi * decay_ratio)) # starts at 1 and goes to 0 gradually
     return min_lr + coeff * (max_lr - min_lr)
@@ -113,7 +118,7 @@ def main():
 
     optimizer = configure_optimizer(raw_model, weight_decay=0.1, learning_rate=6e-4, device=device) # lr is updated in the training loop below
 
-    for step in range(max_steps):
+    for step in range(n_steps):
         t0 = time()
         optimizer.zero_grad()
         loss_accum = 0.0
@@ -148,6 +153,19 @@ def main():
         tokens_processed = train_loader.batch_size * train_loader.block_size * grad_accum_steps * ddp_world_size
         tokens_per_sec = tokens_processed / dt
         _print(f"step: {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+    
+    # checkpoint_path = os.path.join(log_dir, f"gpt2_fineweb_edu_{step:05d}.pt")
+    # checkpoint = {
+    #     'model': raw_model.state_dict(),
+    #     'config': raw_model.config,
+    #     'step': step,
+    #     'val_loss': val_loss_accum.item(),
+    #     'optimizer_state_dict': optimizer.state_dict(),
+    #     'rng_seed': rng_seed,
+    # }
+    # # you might also want to add optimizer.state_dict() and
+    # # rng seeds etc., if you wanted to more exactly resume training
+    # torch.save(checkpoint, checkpoint_path)
         
     if ddp:
         destroy_process_group()
