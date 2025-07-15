@@ -7,7 +7,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 
-from utils import get_torch_device, GPT2DataLoaderLite
+from utils import get_torch_device, TinyShakespeareLoader
 from model import GPT, GPTConfig
 
 # set up DDP (distributed data parallel)
@@ -47,7 +47,7 @@ min_lr = max_lr * 0.1
 warmup_steps = 10
 max_steps = 50
 total_batch_size_tok = 524288 # 2**19, ~0.5M in number of tokens | desired batch size | for grad accumulation
-micro_batch_size = 4
+micro_batch_size = 16
 block_size = 1024 # context length
 # ----------------------------------
 tok_per_microbatch = micro_batch_size * block_size * ddp_world_size
@@ -99,7 +99,7 @@ def configure_optimizer(model: torch.nn.Module, weight_decay: float, learning_ra
     return optimizer
 
 def main():
-    train_loader = GPT2DataLoaderLite("input.txt", B=micro_batch_size, T=block_size, process_rank=ddp_local_rank, num_process=ddp_world_size)
+    train_loader = TinyShakespeareLoader(batch_size=micro_batch_size, block_size=block_size, proc_rank=ddp_local_rank, n_proc=ddp_world_size)
     
     # Uses TF32 if available check: https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
     torch.set_float32_matmul_precision("high")
@@ -145,7 +145,7 @@ def main():
         if torch.cuda.is_available():
             torch.cuda.synchronize()
         dt = (time() - t0)
-        tokens_processed = train_loader.B * train_loader.T * grad_accum_steps * ddp_world_size
+        tokens_processed = train_loader.batch_size * train_loader.block_size * grad_accum_steps * ddp_world_size
         tokens_per_sec = tokens_processed / dt
         _print(f"step: {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
         

@@ -1,6 +1,6 @@
 import torch
 import tiktoken
-from train import _print
+from pathlib import Path
 
 def get_torch_device():
     if torch.cuda.is_available():
@@ -9,38 +9,38 @@ def get_torch_device():
         device = torch.device("mps")
     else:
         try:
-            import torch_xla.core.xla_model as xm
+            import torch_xla.core.xla_model as xm # type: ignore
             device = xm.xla_device()
-            print("Using TPU device")
         except ImportError:
             device = torch.device("cpu")
-            print("Using CPU device (no GPU/TPU available)")
     return device
 
-class GPT2DataLoaderLite:
+tiny_shakespeare_raw_txt = Path("./dataset/tinyshakespeare/raw.txt")
+class TinyShakespeareLoader:
     
-    def __init__(self, filepath, B, T, process_rank, num_processess):
-        self.B = B
-        self.T = T
-        self.process_rank = process_rank
-        self.num_processes = num_processess
+    def __init__(self, batch_size, block_size, proc_rank, n_proc):
+        self.batch_size = batch_size # batch size
+        self.block_size = block_size # context length
+        self.proc_rank = proc_rank
+        self.n_proc = n_proc
         
-        with open(filepath, 'r') as f:
+        with tiny_shakespeare_raw_txt.open('r') as f:
             text = f.read()
         
         enc = tiktoken.get_encoding('gpt2')
         self.tokens = torch.tensor(enc.encode(text))
-        _print(f"Loaded {len(self.tokens)} tokens")
+        if proc_rank == 0:
+            print(f"Loaded {len(self.tokens)} tokens")
         
         # state
-        self.current_position = self.B * self.T * self.process_rank
+        self.current_position = self.batch_size * self.block_size * self.proc_rank
     
     def next_batch(self):
-        B, T = self.B, self.T
+        B, T = self.batch_size, self.block_size
         buf = self.tokens[self.current_position : self.current_position + (B*T)+1]
         x = buf[:-1].view(B, T)
         y = buf[1:].view(B, T)
-        self.current_position += (B * T * self.num_processes)
-        if self.current_position + (B * T * self.num_processes + 1) > len(self.tokens):
-            self.current_position = (B * T * self.process_rank * self.num_processes)
+        self.current_position += (B * T * self.n_proc)
+        if self.current_position + (B * T * self.n_proc + 1) > len(self.tokens):
+            self.current_position = (B * T * self.proc_rank * self.n_proc)
         return x, y
