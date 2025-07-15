@@ -7,7 +7,7 @@ from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
 
-from utils import get_torch_device, TinyShakespeareLoader
+from utils import get_torch_device, TinyShakespeareLoader, FineWebEduLoader
 from model import GPT, GPTConfig
 
 # ------------- params -------------
@@ -18,6 +18,7 @@ n_steps = 19073
 total_batch_size_tok = 524288 # 2**19, ~0.5M in number of tokens | desired batch size | for grad accumulation
 micro_batch_size = 16
 block_size = 1024 # context length
+val_per_step = 250
 # ----------------------------------
 
 # set up DDP (distributed data parallel)
@@ -104,7 +105,8 @@ def configure_optimizer(model: torch.nn.Module, weight_decay: float, learning_ra
     return optimizer
 
 def main():
-    train_loader = TinyShakespeareLoader(batch_size=micro_batch_size, block_size=block_size, proc_rank=ddp_local_rank, n_proc=ddp_world_size)
+    train_loader = FineWebEduLoader(batch_size=micro_batch_size, block_size=block_size, proc_rank=ddp_local_rank, n_proc=ddp_world_size, split="train")
+    val_loader = FineWebEduLoader(batch_size=micro_batch_size, block_size=block_size, proc_rank=ddp_local_rank, n_proc=ddp_world_size, split="val")
     
     # Uses TF32 if available check: https://docs.pytorch.org/docs/stable/generated/torch.set_float32_matmul_precision.html
     torch.set_float32_matmul_precision("high")
@@ -120,6 +122,29 @@ def main():
 
     for step in range(n_steps):
         t0 = time()
+        
+        # val
+        if step % val_per_step == 0:
+            model.eval()
+            val_loader.reset()
+            with torch.no_grad():
+                val_loss_accum = 0.0
+                val_loss_steps = 20
+                for _ in range(val_loss_steps):
+                    x, y = val_loader.next_batch()
+                    x, y = x.to(device), y.to(device)
+                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                        logits, loss = model(x, y)
+                    loss = loss / val_loss_steps
+                    val_loss_accum += loss.detach()
+            
+            if ddp:
+                dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
+            if master_process:
+                print(f"validation loss: {val_loss_accum.item():.4f}")
+        
+        # train
+        model.train()
         optimizer.zero_grad()
         loss_accum = 0.0
         for micro_step in range(grad_accum_steps):
