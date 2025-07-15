@@ -6,6 +6,7 @@ import torch
 from torch.distributed import init_process_group, destroy_process_group
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
+from pathlib import Path
 
 from utils import get_torch_device, TinyShakespeareLoader, FineWebEduLoader
 from model import GPT, GPTConfig
@@ -19,6 +20,8 @@ total_batch_size_tok = 524288 # 2**19, ~0.5M in number of tokens | desired batch
 micro_batch_size = 16
 block_size = 1024 # context length
 val_per_step = 250
+save_ckpt_every = 5000
+log_dir = Path("./logs")
 # ----------------------------------
 
 # set up DDP (distributed data parallel)
@@ -52,13 +55,15 @@ def _print(text):
     if master_process:
         print(text)
         
+assert save_ckpt_every % val_per_step, "val_per_step should be multiple of save_ckpt_every"
 tok_per_microbatch = micro_batch_size * block_size * ddp_world_size
 assert total_batch_size_tok % tok_per_microbatch == 0, f"Make sure {total_batch_size_tok=} is divisible by (batch_size * block_size * dpp_world_size)"
 grad_accum_steps = total_batch_size_tok // tok_per_microbatch
 _print(f"Calculated gradient accumulation steps: {grad_accum_steps}")
 
-log_dir = "./logs"
-os.makedirs(log_dir, exist_ok=True)
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / "logs.txt"
+log_file.touch()
 rng_seed = 1337
 
 torch.manual_seed(rng_seed)
@@ -117,14 +122,17 @@ def main():
     if ddp:
         model = DDP(model, device_ids=[ddp_local_rank])
     raw_model = model.module if ddp else model # raw unwrapped model
+    
+    device_type = "cuda" if device.startswith("cuda") else "cpu"
 
     optimizer = configure_optimizer(raw_model, weight_decay=0.1, learning_rate=6e-4, device=device) # lr is updated in the training loop below
 
     for step in range(n_steps):
+        last_step = step == (n_steps - 1)
         t0 = time()
         
-        # val
-        if step % val_per_step == 0:
+         # once in a while evaluate our validation loss
+        if step % 250 == 0 or last_step:
             model.eval()
             val_loader.reset()
             with torch.no_grad():
@@ -133,15 +141,27 @@ def main():
                 for _ in range(val_loss_steps):
                     x, y = val_loader.next_batch()
                     x, y = x.to(device), y.to(device)
-                    with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                         logits, loss = model(x, y)
                     loss = loss / val_loss_steps
                     val_loss_accum += loss.detach()
-            
             if ddp:
                 dist.all_reduce(val_loss_accum, op=dist.ReduceOp.AVG)
             if master_process:
                 print(f"validation loss: {val_loss_accum.item():.4f}")
+                with log_file.open("a") as f:
+                    f.write(f"{step} val {val_loss_accum.item():.4f}\n")
+                if step > 0 and (step % save_ckpt_every == 0 or last_step):
+                    checkpoint_path = log_dir / f"gpt2_{step:05d}.pt"
+                    checkpoint = {
+                        'model': raw_model.state_dict(),
+                        'config': raw_model.config,
+                        'step': step,
+                        'val_loss': val_loss_accum.item(),
+                        # 'optimizer_state_dict': optimizer.state_dict,
+                        # 'rng_seed': rng_seed
+                    }
+                    torch.save(checkpoint, str(checkpoint_path))
         
         # train
         model.train()
@@ -151,7 +171,7 @@ def main():
             x, y = train_loader.next_batch()
             x, y = x.to(device), y.to(device)
             # autocast the forward pass to bfloat16 - i think it only applies to matmul ops check: https://docs.pytorch.org/docs/stable/amp.html#torch.autocast
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            with torch.autocast(device_type=device_type, dtype=torch.bfloat16):
                 logits, loss = model(x, y)
             # we have to scale the loss to account for grad accumulation, because the gradients just add on each
             # successive backward(). SUM of grad corresponds to SUM of objective, but instead we want MEAN, so scale the loss by `1/grad_accum_steps`
@@ -178,20 +198,10 @@ def main():
         tokens_processed = train_loader.batch_size * train_loader.block_size * grad_accum_steps * ddp_world_size
         tokens_per_sec = tokens_processed / dt
         _print(f"step: {step:5d} | loss: {loss_accum.item():.6f} | lr: {lr:.4e} | norm: {norm:.4f} | dt: {dt*1000:.2f}ms | tok/sec: {tokens_per_sec:.2f}")
+        if master_process:
+            with log_file.open("a") as f:
+                f.write(f"{step} train {loss_accum.item():.6f}\n")
     
-    # checkpoint_path = os.path.join(log_dir, f"gpt2_fineweb_edu_{step:05d}.pt")
-    # checkpoint = {
-    #     'model': raw_model.state_dict(),
-    #     'config': raw_model.config,
-    #     'step': step,
-    #     'val_loss': val_loss_accum.item(),
-    #     'optimizer_state_dict': optimizer.state_dict(),
-    #     'rng_seed': rng_seed,
-    # }
-    # # you might also want to add optimizer.state_dict() and
-    # # rng seeds etc., if you wanted to more exactly resume training
-    # torch.save(checkpoint, checkpoint_path)
-        
     if ddp:
         destroy_process_group()
         
