@@ -15,12 +15,12 @@ from model import GPT, GPTConfig
 max_lr = 1.2e-3 # 6e-4 * 2 Doubled the learning rate compared to GPT2
 min_lr = max_lr * 0.1
 warmup_steps = 300 # 715
-n_steps = 19073
+n_steps = 9537 # 19073
 total_batch_size_tok = 524288 # 2**19, ~0.5M in number of tokens | desired batch size | for grad accumulation
 micro_batch_size = 16
 block_size = 1024 # context length
 val_per_step = 250
-save_ckpt_every = 5000
+save_ckpt_every = 1000
 log_dir = Path("./logs")
 # ----------------------------------
 
