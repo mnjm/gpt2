@@ -2,6 +2,7 @@ import numpy as np
 import torch
 import tiktoken
 from pathlib import Path
+from collections import OrderedDict
 
 tiny_shakespeare_raw_txt = Path("./dataset/tinyshakespeare/raw.txt")
 fineweb_edu_dir = Path("./dataset/edu-fineweb10B")
@@ -88,3 +89,14 @@ class FineWebEduLoader:
             self.tokens = load_tokens(self.shards[self.current_shard])
             self.current_position = (B * T * self.proc_rank)
         return x, y
+    
+def load_ckpt_with_fix(model, ckpt):
+    # For some reason keys have "_orig_mod" prefixed to them, not sure why
+    # removing the prefix
+
+    state_dict = OrderedDict()
+    for k, v in ckpt['model'].items():
+        key = k.replace('_orig_mod.', '')
+        state_dict[key] = v
+
+    model.load_state_dict(state_dict)

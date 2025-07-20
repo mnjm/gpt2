@@ -1,10 +1,20 @@
 # GPT-2 Pretraining
 
-An attempt at GPT2 Pretraining on FineWeb Edu dataset (20B tokens). Follows Karpathy's [build-nanogpt](https://github.com/karpathy/build-nanogpt).
+A from-scratch GPT2 implementation pretrained on a 5 billion token subset of the FineWeb-Edu dataset's 10B subset, Modeled after Karpathy's [nanoGPT](https://github.com/karpathy/nanoGPT). Achieves 28.65% accuracy on HellaSwag validation, coming within 0.3% of the original GPT-2 small's 28.92% accuracy despite training on just half the data. (GPT2 was trained on WebText ~10Bn tokens). This I assume is because of different dataset quality.
+
+## HellaSwag Benchmark
+
+| Model               | Accuracy | Normalized Accuracy | Training Tokens | Dataset          |
+|---------------------|----------|---------------------|-----------------|------------------|
+| GPT-2 small (124M)  | 28.92%   | 31.14%              | ~10B           | WebText          |
+| [mine](https://drive.google.com/file/d/1FT_xcA26tvcNaEiQfjIsifknF2wR9SqB/view?usp=sharing)                | 28.65%   | 29.55%              | 5B              | FineWeb-Edu (subset\*) |
+
+\*5Bn subset of Fineweb-Edu's Sample 10Bn dataset
 
 ## Loss
 
 ![Loss](./misc/loss.png)
+
 
 ## Sample Output
 
@@ -22,9 +32,10 @@ I think that there is a need for a language-centered framework that addresses
 - `model.py`: Minimal GPT2 implementation
 - `train.py`: Training script with multi-gpu training support
 - `utils.py`: Mainly contains data loader.
-- `download-fineweb-edu.py`: Downloads the FineWeb Edu (20B) dataset from Hugging Face, tokenizes it, and saves it in shards.
+- `download-fineweb-edu.py`: Downloads the FineWeb Edu (10Bn) dataset from Hugging Face, tokenizes it, and saves it in shards.
 
-## Usage
+## Training
+
 1. Download dataset
 ```
 python download-fineweb-edu.py
@@ -32,11 +43,8 @@ python download-fineweb-edu.py
 
 2. Start training:
 
-**If you're rich with multiple GPUs**
 ```
-torchrun --standalone --nproc_per_node=<No.of.GPUs> train.py
+./train.sh
 ```
-or **Single GPU / CPU**
-```
-python train.py
-```
+
+- This script automatically detects available GPUs and uses DDP for multi-GPU training
