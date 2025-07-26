@@ -4,7 +4,7 @@ A from-scratch GPT2 implementation pretrained on a 5 billion token subset of the
 
 ## HellaSwag Benchmark
 
-| Model               | Accuracy | Normalized Accuracy | Training Tokens | Dataset          |
+| Model               | Accuracy | Multiple Choice Accuracy | Training Tokens | Dataset          |
 |---------------------|----------|---------------------|-----------------|------------------|
 | GPT-2 small (124M)  | 28.92%   | 31.14%              | ~10B           | WebText          |
 | [mine](https://drive.google.com/file/d/1FT_xcA26tvcNaEiQfjIsifknF2wR9SqB/view?usp=sharing)                | 28.65%   | 29.55%              | 5B              | FineWeb-Edu (subset\*) |
