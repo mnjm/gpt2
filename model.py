@@ -1,8 +1,10 @@
+import math
+from dataclasses import dataclass
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-import math
-from dataclasses import dataclass
+
 
 @dataclass
 class GPTConfig:
@@ -26,7 +28,7 @@ class CausalSelfAttention(nn.Module):
         self.n_head = config.n_head
         self.n_embd = config.n_embd
         # flash attention is only supported from torch >= 2.0
-        self.flash_attn = hasattr(F, 'scaled_dot_product_attention')
+        self.flash_attn = hasattr(F, "scaled_dot_product_attention")
         if not self.flash_attn:
             print("WARNING: Using slow attention. Flash attention is only supported in Pytorch >= 2.0")
             # below is not a "bias", it is a mask / trill but following OpenAI/HF naming so..
@@ -50,7 +52,7 @@ class CausalSelfAttention(nn.Module):
             attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
             attn = F.softmax(attn, dim=-1)
             y = attn @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
-        y = (y.transpose(1, 2).contiguous().view(B, T, C))  # re-assemble all head outputs side by side
+        y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
         return y
@@ -122,7 +124,7 @@ class GPT(nn.Module):
 
     def forward(self, idx, target=None):
         B, T = idx.size()
-        assert T <= self.config.block_size, (f"Cannt forward sequence of length {T}, block size is only {self.config.block_size}")
+        assert self.config.block_size >= T, f"Cannt forward sequence of length {T}, block size is only {self.config.block_size}"
         pos_emb = self.transformer.wpe(torch.arange(0, T, dtype=torch.long, device=idx.device))  # pos embedding (T, n_embd)
         tok_emb = self.transformer.wte(idx)  #  token embedding (B, T, n_embd)
         x = tok_emb + pos_emb  # (B, T, n_embd)
@@ -157,7 +159,7 @@ class GPT(nn.Module):
         model = GPT(config)
         sd = model.state_dict()
         sd_keys = sd.keys()
-        sd_keys = [ k for k in sd_keys if not k.endswith(".attn.bias") ]  # discard this mask / buffer
+        sd_keys = [k for k in sd_keys if not k.endswith(".attn.bias")]  # discard this mask / buffer
 
         # init a hf/transformer model
         model_hf = GPT2LMHeadModel.from_pretrained(model_type)
@@ -165,8 +167,8 @@ class GPT(nn.Module):
 
         # copy while ensuring all of the params are aligned and match in names and shapes
         sd_keys_hf = sd_hf.keys()
-        sd_keys_hf = [ k for k in sd_keys_hf if not k.endswith(".attn.masked_bias") ]  # ignore these masks
-        sd_keys_hf = [ k for k in sd_keys_hf if not k.endswith(".attn.bias") ]  # ignore biases, same as masks
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith(".attn.masked_bias")]  # ignore these masks
+        sd_keys_hf = [k for k in sd_keys_hf if not k.endswith(".attn.bias")]  # ignore biases, same as masks
         transposed = [
             "attn.c_attn.weight",
             "attn.c_proj.weight",
@@ -175,7 +177,7 @@ class GPT(nn.Module):
         ]
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
-        assert len(sd_keys_hf) == len(sd_keys), (f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}")
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
         for k in sd_keys_hf:
             if any(k.endswith(w) for w in transposed):
                 # special treatment for the Conv1D weights we need to transpose
