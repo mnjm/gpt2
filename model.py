@@ -34,7 +34,8 @@ class CausalSelfAttention(nn.Module):
             # below is not a "bias", it is a mask / trill but following OpenAI/HF naming so..
             self.register_buffer("bias", torch.tril(torch.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size))
 
-    def forward(self, x):
+    def forward(self, x, kv_cache=None):
+        """Return attention output and the updated key/value cache for this layer."""
         B, T, C = x.size()  # batch size, sequence length, embd dim (n_embd)
         # calculate query, key, values for all heads in batch and move forward to the batch
         # nh is no. of heads, hs is head size, and C is number of channles = nh * hs
@@ -43,19 +44,33 @@ class CausalSelfAttention(nn.Module):
         q = q.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         v = v.view(B, T, self.n_head, C // self.n_head).transpose(1, 2)  # (B, nh, T, hs)
         # attention (materializes the large (T, T) matrix for all the queries and keys)
+        past_tok_len = 0
+        if kv_cache is not None:
+            # Reuse the past keys/values and append this decoding step.
+            past_k, past_v = kv_cache  # (B, nh, past_tok_len, hs)
+            past_tok_len = past_k.size(-2)
+            k = torch.cat([past_k, k], dim=-2)
+            v = torch.cat([past_v, v], dim=-2)
+            # Supporting multi-token inputs with KV caching requires offsetting the causal mask.
+            # This implementation only supports the common decoding case of a single-token forward pass.
+            assert T == 1, "Only one token forward is supported with caching enabled"
+        kv_cache = (k, v)  # updated cache includes both past and current tokens
+
         if self.flash_attn:
-            # efficient attention using Flash Attention CUDA kernels
-            y = torch.nn.functional.scaled_dot_product_attention(q, k, v, is_causal=True)
+            # During KV-cache decoding (T == 1), there are no future tokens to mask, so
+            # causal masking is should be disabled. Otherwise, causal masking is enabled in other cases.
+            y = F.scaled_dot_product_attention(q, k, v, is_causal=T > 1)
         else:
             # manual implementation of attention
             attn = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
-            attn = attn.masked_fill(self.bias[:, :, :T, :T] == 0, float("-inf"))
+            # Select mask rows at the queries' absolute positions in the cache.
+            attn = attn.masked_fill(self.bias[:, :, past_tok_len : past_tok_len + T, : k.size(-2)] == 0, float("-inf"))
             attn = F.softmax(attn, dim=-1)
             y = attn @ v  # (B, nh, T, T) x (B, nh, T, hs) -> (B, nh, T, hs)
         y = y.transpose(1, 2).contiguous().view(B, T, C)  # re-assemble all head outputs side by side
         # output projection
         y = self.c_proj(y)
-        return y
+        return y, kv_cache
 
 
 class MLP(nn.Module):
@@ -81,10 +96,11 @@ class Block(nn.Module):
         self.ln_2 = nn.LayerNorm(config.n_embd)
         self.mlp = MLP(config)
 
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
+    def forward(self, x, kv_cache=None):
+        attn_out, kv_cache = self.attn(self.ln_1(x), kv_cache=kv_cache)
+        x = x + attn_out
         x = x + self.mlp(self.ln_2(x))
-        return x
+        return x, kv_cache
 
 
 class GPT(nn.Module):
@@ -122,20 +138,35 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, target=None):
-        B, T = idx.size()
+    def forward(self, idx, target=None, kv_caches=None):
+        """Forward tokens, optionally updating one key/value cache per layer in place."""
+        _, T = idx.size()
         assert self.config.block_size >= T, f"Cannt forward sequence of length {T}, block size is only {self.config.block_size}"
-        pos_emb = self.transformer.wpe(torch.arange(0, T, dtype=torch.long, device=idx.device))  # pos embedding (T, n_embd)
+        past_tok_len = 0
+        # Every layer has the same cached sequence length; None marks prompt prefill.
+        if kv_caches is not None and kv_caches[0] is not None:
+            past_tok_len = kv_caches[0][0].size(-2)
+        assert past_tok_len + T <= self.config.block_size, f"Cannot forward sequence of length {T} with past token length {past_tok_len} and block size {self.config.block_size}"
+        # Continue absolute positions after the cached prefix instead of restarting at zero.
+        pos_emb = self.transformer.wpe(torch.arange(past_tok_len, past_tok_len + T, dtype=torch.long, device=idx.device))  # pos embedding (T, n_embd)
         tok_emb = self.transformer.wte(idx)  #  token embedding (B, T, n_embd)
         x = tok_emb + pos_emb  # (B, T, n_embd)
-        for block in self.transformer.h:
-            x = block(x)
+        for idx, block in enumerate(self.transformer.h):
+            kv_cache = None if kv_caches is None else kv_caches[idx]
+            x, kv_cache = block(x, kv_cache=kv_cache)
+            if kv_caches is not None:
+                # Preserve each layer's updated cache for the next decoding call.
+                kv_caches[idx] = kv_cache
         x = self.transformer.ln_f(x)  # layer norm
         logits = self.lm_head(x)  # (B, T, vocab_size)
         loss = None
         if target is not None:
             loss = F.cross_entropy(logits.view(-1, logits.size(-1)), target.view(-1), ignore_index=-1)
-        return logits, loss
+        return logits, loss, kv_caches
+
+    def init_kv_caches(self):
+        """Create empty per-layer caches; the first cached call performs prompt prefill."""
+        return [None] * len(self.transformer.h)
 
     @classmethod
     def from_pretrained(cls, model_type):
